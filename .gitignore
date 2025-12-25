@@ -85,3 +85,6 @@ htmlcov/
 
 # mypy
 .mypy_cache/
+
+# Deep Network Analysis Reports
+.claude/skills/deep-network/reports/

@@ -1,11 +1,11 @@
 ---
 name: deep-network
-description: Deep analysis pipeline - performs semantic search on Hacker News, applies Default Mode Network associative thinking to results, rigorously evaluates claims with causal analysis, then emails the analysis in HTML format. Use when user says "deep network", "deep search", "deep analysis", or wants comprehensive insight mining from HN data.
+description: Deep analysis pipeline - performs semantic search on Hacker News, applies Default Mode Network associative thinking to results, rigorously evaluates claims with causal analysis, emails HTML report, and archives markdown report locally. Use when user says "deep network", "deep search", "deep analysis", or wants comprehensive insight mining from HN data.
 ---
 
 # Deep Network Analysis Pipeline
 
-A meta-skill that chains four capabilities for comprehensive insight generation:
+A meta-skill that chains five capabilities for comprehensive insight generation:
 
 ## Critical Implementation Notes
 
@@ -32,21 +32,22 @@ A meta-skill that chains four capabilities for comprehensive insight generation:
 2. **Default Mode Network** - Apply associative thinking to discover connections (divergent)
 3. **Causal Analyst** - Rigorously evaluate claims and test robustness (convergent)
 4. **Email Delivery** - Send formatted HTML report to recipient
+5. **Archive Report** - Save markdown report to `reports/` directory for future reference
 
 ### The Divergent→Convergent Architecture
 
 ```
-Semantic Search ──→ DMN (Divergent) ──→ Causal Analyst (Convergent) ──→ Email
-     │                    │                        │
-     │                    │                        │
-   Find data         Generate              Test claims:
-   from HN           hypotheses,           - "What if we do X?"
-                     patterns,             - "Why did this happen?"
+Semantic Search ──→ DMN (Divergent) ──→ Causal Analyst (Convergent) ──→ Email ──→ Archive
+     │                    │                        │                      │         │
+     │                    │                        │                      │         │
+   Find data         Generate              Test claims:               Send      Save .md
+   from HN           hypotheses,           - "What if we do X?"      HTML      report
+                     patterns,             - "Why did this happen?"  report    locally
                      associations          - "Is this robust?"
                                           - Alternative explanations
 ```
 
-This mirrors the scientific method: **generate hypotheses, then test them**.
+This mirrors the scientific method: **generate hypotheses, then test them, then archive for future reference**.
 
 ## Workflow
 
@@ -179,6 +180,141 @@ source .venv/bin/activate && python .claude/skills/send-email/scripts/send_email
   --body-file /tmp/deep_network_report.html \
   --html
 ```
+
+### Step 5: Archive Markdown Report
+
+**IMPORTANT:** Always save a markdown version of the analysis to the `reports/` directory for future reference and searchability.
+
+**Create the reports directory if it doesn't exist:**
+```bash
+mkdir -p .claude/skills/deep-network/reports
+```
+
+**Save the markdown report:**
+Use Bash heredoc to create the report file with naming convention `YYYY-MM-DD_<topic-slug>.md`:
+
+```bash
+cat > .claude/skills/deep-network/reports/YYYY-MM-DD_topic-slug.md << 'MDEOF'
+# Deep Network Analysis: [TOPIC]
+
+**Date:** [Date]
+**Query:** "[original query]"
+**Pipeline:** Semantic Search → DMN ULTRATHINK → Causal Analyst → Synthesis
+
+---
+
+## Executive Summary
+
+| Step | Details |
+|------|---------|
+| **Semantic Search** | [N] HN discussions analyzed |
+| **DMN ULTRATHINK** | [N] agents, [N] cycles, [N] cross-domain transfers |
+| **Causal Analysis** | [N] claims tested |
+| **Crystallization** | Cycle [N], novelty at termination ~[N]% |
+
+---
+
+## Seeds (Source Material)
+
+[Table of HN sources with IDs, types, content, and links]
+
+---
+
+## ULTRATHINK Cycle Journey
+
+### Cycle Statistics
+- **Mode cycles:** [N]
+- **Total agents:** [N]
+- **Cross-domain transfers:** [List domains]
+- **Crystallization point:** [Description]
+- **Novelty at termination:** [N]%
+
+### Cycle Details
+[List all agents and their contributions]
+
+---
+
+## Emergent Insights
+
+### 1. [Insight Title]
+[Insight content with diagrams if applicable]
+
+### 2. [Insight Title]
+[Insight content]
+
+[Continue for all insights...]
+
+---
+
+## Central Theme
+
+### [Theme Title]
+
+[Full description of the central theme]
+
+---
+
+## Causal Rigor Check
+
+### Claim 1: [Claim Name] (MODE)
+
+**Claim:** "[Full claim text]"
+
+**Analysis:** [Analysis details]
+
+**Verdict:** **[STRONG/MODERATE/WEAK]**
+
+[Repeat for all claims...]
+
+---
+
+## Causal Verdicts Summary
+
+| Claim | Verdict | Key Insight |
+|-------|---------|-------------|
+| [Claim 1] | **[VERDICT]** | [Insight] |
+| [Claim 2] | **[VERDICT]** | [Insight] |
+| [Claim 3] | **[VERDICT]** | [Insight] |
+
+---
+
+## Implications
+
+### For Practitioners
+[Implications]
+
+### For Researchers
+[Implications]
+
+### For Strategists
+[Implications]
+
+### Watch For
+[Things to monitor]
+
+---
+
+## Key Takeaway
+
+> [Single paragraph summary of the most important insight]
+
+---
+
+## Metadata
+
+- **Pipeline:** Deep Network Analysis
+- **Divergent phase:** [N] agents, [N] cycles
+- **Convergent phase:** [Modes used]
+- **Generated:** [Date]
+MDEOF
+```
+
+**Report Location:**
+All reports are stored in `.claude/skills/deep-network/reports/` with the following benefits:
+- Searchable archive of past analyses
+- Reference for follow-up investigations
+- Comparison across different topics over time
+- Shareable markdown format
 
 ## HTML Report Template
 
@@ -318,6 +454,7 @@ User: "deep network AI startup funding trends"
    - "Technical founders raise more" → STRUCTURE analysis: Confounder check
    - "Funding winter ending" → INVARIANCE analysis: Robust or wishful thinking?
 4. HTML report with both insights AND causal verdicts emailed
+5. Markdown report saved to reports/2025-01-15_ai-startup-funding.md
 ```
 
 ### Why Both Phases Matter
