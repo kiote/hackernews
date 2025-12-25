@@ -1,5 +1,0 @@
-# State directory for Default Mode Network skill
-# This directory stores persistent data:
-# - concepts.json: Concept graph (nodes and edges)
-# - sessions.md: Session summaries
-# - associations.md: Discovered associations
