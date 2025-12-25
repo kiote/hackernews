@@ -1,0 +1,49 @@
+{
+  "relationship_weights": {
+    "IS-A": 0.9,
+    "HAS-A": 0.8,
+    "CAUSES": 0.85,
+    "ENABLES": 0.8,
+    "REQUIRES": 0.8,
+    "RESEMBLES": 0.7,
+    "OPPOSES": 0.6,
+    "CO-OCCURS": 0.5,
+    "TRANSFORMS-TO": 0.75,
+    "RELATED": 0.5
+  },
+  "spreading_activation": {
+    "default_depth": 3,
+    "decay_rate": 0.7,
+    "activation_threshold": 0.1
+  },
+  "pruning": {
+    "enabled": true,
+    "max_concepts": 1000,
+    "decay_half_life_days": 30,
+    "min_access_count": 2,
+    "protected_age_hours": 24
+  },
+  "embeddings": {
+    "model_name": "all-MiniLM-L6-v2",
+    "similarity_threshold": 0.7,
+    "semantic_weight": 0.4,
+    "graph_weight": 0.6
+  },
+  "domains": [
+    "biology",
+    "physics",
+    "economics",
+    "music",
+    "architecture",
+    "games",
+    "ecology",
+    "military",
+    "cooking",
+    "sports",
+    "theater",
+    "law",
+    "medicine",
+    "mythology",
+    "urban_planning"
+  ]
+}
