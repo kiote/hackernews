@@ -113,7 +113,7 @@ python semantic_search.py "companies that pivoted successfully"
 
 ## Technical Details
 
-**Stack**: Python 3.13, sentence-transformers (all-MiniLM-L6-v2), FAISS, DuckDB, Parquet
+**Stack**: Python 3.13, sentence-transformers (all-MiniLM-L6-v2), FAISS (vector search), DuckDB (metadata), Parquet
 
 **Storage**: 5.5GB parquet + 54GB embeddings + 2GB FAISS index + 26GB DuckDB = ~88GB total
 
