@@ -410,19 +410,21 @@ def update_duckdb(parquet_files: list):
 
     for pq_file in parquet_files:
         print(f"Adding {pq_file} to DuckDB...")
+        # Insert only items not already in the table
         conn.execute(f"""
-            INSERT OR IGNORE INTO hn
+            INSERT INTO hn
             SELECT
                 id::UINTEGER as id,
                 type::VARCHAR as type,
-                by::VARCHAR as author,
+                "by"::VARCHAR as author,
                 time::UINTEGER as time,
                 text::VARCHAR as text,
                 title::VARCHAR as title,
                 url::VARCHAR as url,
                 score::UINTEGER as score
-            FROM read_parquet('{pq_file}')
+            FROM read_parquet('{pq_file}') pq
             WHERE deleted IS NOT TRUE AND dead IS NOT TRUE
+            AND NOT EXISTS (SELECT 1 FROM hn WHERE hn.id = pq.id)
         """)
 
     count = conn.execute("SELECT COUNT(*) FROM hn").fetchone()[0]
