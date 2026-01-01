@@ -18,23 +18,25 @@ from sentence_transformers import SentenceTransformer
 EMBEDDINGS_DIR = Path("embeddings")
 MODEL_NAME = "all-MiniLM-L6-v2"
 
-# Global cache for model and index
+# Global cache for model and indexes
 _model = None
-_index = None
-_id_mapping = None
+_main_index = None
+_main_id_mapping = None
+_incr_index = None
+_incr_id_mapping = None
 _db_conn = None
 
 
 def load_resources():
-    """Load model, index, and database connection."""
-    global _model, _index, _id_mapping, _db_conn
+    """Load model, indexes (main + incremental), and database connection."""
+    global _model, _main_index, _main_id_mapping, _incr_index, _incr_id_mapping, _db_conn
 
     if _model is None:
         print("Loading embedding model...")
         _model = SentenceTransformer(MODEL_NAME)
 
-    if _index is None:
-        # Try IVF+PQ first, fall back to flat
+    if _main_index is None:
+        # Load main index (IVF+PQ or flat)
         index_file = EMBEDDINGS_DIR / "faiss_index_ivf_pq.bin"
         if not index_file.exists():
             index_file = EMBEDDINGS_DIR / "faiss_index_flat.bin"
@@ -42,21 +44,28 @@ def load_resources():
         if not index_file.exists():
             raise FileNotFoundError("FAISS index not found. Run build_faiss_index.py first.")
 
-        print(f"Loading FAISS index from {index_file}...")
-        _index = faiss.read_index(str(index_file))
+        print(f"Loading main FAISS index from {index_file}...")
+        _main_index = faiss.read_index(str(index_file))
+        _main_id_mapping = np.load(EMBEDDINGS_DIR / "id_mapping.npy")
 
-        # Load ID mapping
-        _id_mapping = np.load(EMBEDDINGS_DIR / "id_mapping.npy")
+        # Load incremental index if exists (for recent updates)
+        incr_index_file = EMBEDDINGS_DIR / "faiss_index_incremental.bin"
+        if incr_index_file.exists():
+            print(f"Loading incremental FAISS index...")
+            _incr_index = faiss.read_index(str(incr_index_file))
+            _incr_id_mapping = np.load(EMBEDDINGS_DIR / "incremental_ids.npy")
+            print(f"  Main index: {_main_index.ntotal:,} vectors")
+            print(f"  Incremental index: {_incr_index.ntotal:,} vectors")
 
     if _db_conn is None:
         _db_conn = duckdb.connect("hn_search.db", read_only=True)
 
-    return _model, _index, _id_mapping, _db_conn
+    return _model, _main_index, _main_id_mapping, _incr_index, _incr_id_mapping, _db_conn
 
 
 def search(query: str, limit: int = 10, type_filter: str = None) -> list:
     """
-    Perform semantic search.
+    Perform semantic search across main and incremental indexes.
 
     Args:
         query: Natural language search query
@@ -66,7 +75,7 @@ def search(query: str, limit: int = 10, type_filter: str = None) -> list:
     Returns:
         List of matching results with metadata
     """
-    model, index, id_mapping, conn = load_resources()
+    model, main_index, main_id_mapping, incr_index, incr_id_mapping, conn = load_resources()
 
     # Generate query embedding
     query_embedding = model.encode(
@@ -75,16 +84,38 @@ def search(query: str, limit: int = 10, type_filter: str = None) -> list:
         normalize_embeddings=True
     ).astype(np.float32)
 
-    # Search FAISS index (get more results to filter)
+    # Search FAISS indexes (get more results to filter)
     search_limit = limit * 10 if type_filter else limit
-    distances, indices = index.search(query_embedding, search_limit)
 
-    # Get HN IDs from indices
-    hn_ids = [int(id_mapping[idx]) for idx in indices[0] if idx < len(id_mapping)]
-    scores = distances[0][:len(hn_ids)]
+    # Search main index
+    main_distances, main_indices = main_index.search(query_embedding, search_limit)
+    main_hn_ids = [int(main_id_mapping[idx]) for idx in main_indices[0] if idx < len(main_id_mapping)]
+    main_scores = main_distances[0][:len(main_hn_ids)]
 
-    if not hn_ids:
+    # Combine with incremental index results if available
+    all_results = list(zip(main_hn_ids, main_scores))
+
+    if incr_index is not None and incr_id_mapping is not None:
+        incr_search_limit = min(search_limit, incr_index.ntotal)
+        if incr_search_limit > 0:
+            incr_distances, incr_indices = incr_index.search(query_embedding, incr_search_limit)
+            incr_hn_ids = [int(incr_id_mapping[idx]) for idx in incr_indices[0] if idx < len(incr_id_mapping)]
+            incr_scores = incr_distances[0][:len(incr_hn_ids)]
+            all_results.extend(zip(incr_hn_ids, incr_scores))
+
+    if not all_results:
         return []
+
+    # Sort by similarity score (descending) and remove duplicates
+    seen_ids = set()
+    sorted_results = []
+    for hn_id, score in sorted(all_results, key=lambda x: x[1], reverse=True):
+        if hn_id not in seen_ids:
+            seen_ids.add(hn_id)
+            sorted_results.append((hn_id, score))
+
+    hn_ids = [r[0] for r in sorted_results]
+    scores = {r[0]: r[1] for r in sorted_results}
 
     # Fetch metadata from DuckDB
     id_list = ",".join(map(str, hn_ids))
@@ -101,7 +132,7 @@ def search(query: str, limit: int = 10, type_filter: str = None) -> list:
 
     # Return results in similarity order
     ordered_results = []
-    for hn_id, sim_score in zip(hn_ids, scores):
+    for hn_id in hn_ids:
         if hn_id in result_dict:
             r = result_dict[hn_id]
             ordered_results.append({
@@ -112,7 +143,7 @@ def search(query: str, limit: int = 10, type_filter: str = None) -> list:
                 "text": r[4],
                 "url": r[5],
                 "hn_score": r[6],
-                "similarity": float(sim_score)
+                "similarity": float(scores[hn_id])
             })
             if len(ordered_results) >= limit:
                 break
