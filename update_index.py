@@ -88,28 +88,47 @@ def load_incremental_checkpoint() -> dict:
     if INCR_CHECKPOINT.exists():
         with open(INCR_CHECKPOINT) as f:
             return json.load(f)
-    return {"processed_ids": [], "total_processed": 0, "files_completed": []}
+    return {"total_processed": 0, "row_offset": 0}
 
 
 def save_incremental_checkpoint(checkpoint: dict):
-    """Save checkpoint for incremental processing."""
-    with open(INCR_CHECKPOINT, "w") as f:
+    """Save checkpoint atomically."""
+    temp_file = INCR_CHECKPOINT.with_suffix(".tmp")
+    with open(temp_file, "w") as f:
         json.dump(checkpoint, f)
+    temp_file.rename(INCR_CHECKPOINT)
 
 
-def save_incremental_embeddings(embeddings: np.ndarray, ids: np.ndarray):
-    """Append embeddings to incremental files."""
+def save_incremental_embeddings_atomic(embeddings: np.ndarray, ids: np.ndarray):
+    """Save embeddings atomically (write to temp, then rename)."""
     embeddings = np.ascontiguousarray(embeddings.astype(np.float32))
 
-    if INCR_EMBEDDINGS.exists():
+    # Load existing if present
+    if INCR_EMBEDDINGS.exists() and INCR_IDS.exists():
         existing_emb = np.load(INCR_EMBEDDINGS)
         existing_ids = np.load(INCR_IDS)
         embeddings = np.vstack([existing_emb, embeddings])
         ids = np.concatenate([existing_ids, ids])
 
-    np.save(INCR_EMBEDDINGS, embeddings)
-    np.save(INCR_IDS, ids)
+    # Write to temp files first (np.save adds .npy automatically)
+    temp_emb = EMBEDDINGS_DIR / "incremental_embeddings_tmp"
+    temp_ids = EMBEDDINGS_DIR / "incremental_ids_tmp"
+
+    np.save(temp_emb, embeddings)
+    np.save(temp_ids, ids)
+
+    # Atomic rename (np.save creates .npy files)
+    Path(str(temp_emb) + ".npy").rename(INCR_EMBEDDINGS)
+    Path(str(temp_ids) + ".npy").rename(INCR_IDS)
+
     return len(ids)
+
+
+def load_processed_ids() -> set:
+    """Load already processed IDs from incremental files."""
+    if INCR_IDS.exists():
+        return set(np.load(INCR_IDS).tolist())
+    return set()
 
 
 def generate_embeddings_for_new_items(
@@ -121,22 +140,22 @@ def generate_embeddings_for_new_items(
     """Generate embeddings for items not already in the index, with checkpointing."""
 
     # Load or reset checkpoint
-    if reset_checkpoint and INCR_CHECKPOINT.exists():
-        INCR_CHECKPOINT.unlink()
-        if INCR_EMBEDDINGS.exists():
-            INCR_EMBEDDINGS.unlink()
-        if INCR_IDS.exists():
-            INCR_IDS.unlink()
+    if reset_checkpoint:
+        for f in [INCR_CHECKPOINT, INCR_EMBEDDINGS, INCR_IDS]:
+            if f.exists():
+                f.unlink()
         print("Checkpoint reset - starting fresh")
 
     checkpoint = load_incremental_checkpoint()
-    processed_ids_set = set(checkpoint.get("processed_ids", []))
-    files_completed = set(checkpoint.get("files_completed", []))
+    row_offset = checkpoint.get("row_offset", 0)
 
-    # Combine existing IDs with already processed IDs from checkpoint
+    # Load already processed IDs from incremental files (not JSON)
+    processed_ids_set = load_processed_ids()
+
+    # Combine existing IDs with already processed IDs
     skip_ids = existing_ids | processed_ids_set
+    total_processed = len(processed_ids_set)
 
-    total_processed = checkpoint.get("total_processed", 0)
     batch_embeddings = []
     batch_ids = []
     items_since_checkpoint = 0
@@ -148,112 +167,120 @@ def generate_embeddings_for_new_items(
         print(f"Resuming from checkpoint: {total_processed:,} items already processed")
 
     for pq_file in parquet_files:
-        pq_file_str = str(pq_file)
-
-        # Skip already completed files
-        if pq_file_str in files_completed:
-            print(f"Skipping {pq_file} (already completed)")
-            continue
-
         print(f"\nProcessing {pq_file}...")
+
+        # Read parquet and convert to list of dicts for row-by-row processing
         table = pq.read_table(pq_file)
-        df = table.to_pandas()
+        total_rows = table.num_rows
 
-        total_in_file = len(df)
-        skipped_in_file = 0
-        processed_in_file = 0
+        # Skip to row_offset if resuming same file
+        current_row = 0
+        if row_offset > 0 and total_processed > 0:
+            current_row = row_offset
+            print(f"  Resuming from row {current_row:,}")
+            row_offset = 0  # Reset for next file
 
-        # Prepare all texts and ids first
+        # Process in chunks to avoid loading all into memory
+        chunk_size = 50000
         texts = []
         ids = []
 
-        for _, row in df.iterrows():
-            item_id = int(row["id"])
+        for chunk_start in range(current_row, total_rows, chunk_size):
+            chunk_end = min(chunk_start + chunk_size, total_rows)
+            chunk = table.slice(chunk_start, chunk_end - chunk_start).to_pandas()
 
-            # Skip if already processed
-            if item_id in skip_ids:
-                skipped_in_file += 1
-                continue
+            for idx, row in chunk.iterrows():
+                item_id = int(row["id"])
 
-            content = get_text_content(row)
-            if content:
-                texts.append(content)
-                ids.append(item_id)
+                # Skip if already processed
+                if item_id in skip_ids:
+                    continue
 
-        if not texts:
-            print(f"  No new items to process (skipped {skipped_in_file:,})")
-            files_completed.add(pq_file_str)
-            checkpoint["files_completed"] = list(files_completed)
-            save_incremental_checkpoint(checkpoint)
-            continue
+                content = get_text_content(row)
+                if content:
+                    texts.append(content)
+                    ids.append(item_id)
 
-        print(f"  Generating embeddings for {len(texts):,} new items...")
-        print(f"  (Skipped {skipped_in_file:,} already indexed items)")
+                # Process batch when full
+                if len(texts) >= BATCH_SIZE:
+                    embeddings = model.encode(
+                        texts[:BATCH_SIZE],
+                        show_progress_bar=False,
+                        convert_to_numpy=True,
+                        normalize_embeddings=True
+                    )
 
-        # Process in batches with checkpointing
-        for i in range(0, len(texts), BATCH_SIZE):
-            batch_texts = texts[i:i + BATCH_SIZE]
-            batch_ids_current = ids[i:i + BATCH_SIZE]
+                    batch_embeddings.append(embeddings)
+                    batch_ids.extend(ids[:BATCH_SIZE])
+                    total_processed += BATCH_SIZE
+                    items_since_checkpoint += BATCH_SIZE
 
+                    texts = texts[BATCH_SIZE:]
+                    ids = ids[BATCH_SIZE:]
+
+                    # Progress report
+                    current_time = time.time()
+                    if current_time - last_report_time > 10:
+                        elapsed = current_time - start_time
+                        rate = total_processed / elapsed if elapsed > 0 else 0
+                        print(f"    Processed {total_processed:,} items... ({rate:.0f} items/sec)")
+                        last_report_time = current_time
+
+                    # Checkpoint
+                    if items_since_checkpoint >= CHECKPOINT_EVERY:
+                        print(f"\n  Saving checkpoint at {total_processed:,} items...")
+
+                        emb_array = np.vstack(batch_embeddings)
+                        ids_array = np.array(batch_ids, dtype=np.int32)
+                        save_incremental_embeddings_atomic(emb_array, ids_array)
+
+                        checkpoint["total_processed"] = total_processed
+                        checkpoint["row_offset"] = chunk_start + (idx - chunk.index[0])
+                        save_incremental_checkpoint(checkpoint)
+
+                        # Update skip_ids with newly processed
+                        skip_ids.update(batch_ids)
+                        batch_embeddings = []
+                        batch_ids = []
+                        items_since_checkpoint = 0
+
+                        print(f"  Checkpoint saved.")
+
+        # Process remaining texts in this file
+        while len(texts) >= BATCH_SIZE:
             embeddings = model.encode(
-                batch_texts,
+                texts[:BATCH_SIZE],
                 show_progress_bar=False,
                 convert_to_numpy=True,
                 normalize_embeddings=True
             )
-
             batch_embeddings.append(embeddings)
-            batch_ids.extend(batch_ids_current)
-            total_processed += len(batch_ids_current)
-            processed_in_file += len(batch_ids_current)
-            items_since_checkpoint += len(batch_ids_current)
+            batch_ids.extend(ids[:BATCH_SIZE])
+            total_processed += BATCH_SIZE
+            texts = texts[BATCH_SIZE:]
+            ids = ids[BATCH_SIZE:]
 
-            # Progress report every 10 seconds
-            current_time = time.time()
-            if current_time - last_report_time > 10:
-                elapsed = current_time - start_time
-                rate = (total_processed - checkpoint.get("total_processed", 0)) / elapsed if elapsed > 0 else 0
-                print(f"    Processed {total_processed:,} items... ({rate:.0f} items/sec)")
-                last_report_time = current_time
-
-            # Checkpoint every CHECKPOINT_EVERY items
-            if items_since_checkpoint >= CHECKPOINT_EVERY:
-                print(f"\n  Saving checkpoint at {total_processed:,} items...")
-
-                # Save embeddings
-                if batch_embeddings:
-                    emb_array = np.vstack(batch_embeddings)
-                    ids_array = np.array(batch_ids, dtype=np.int32)
-                    save_incremental_embeddings(emb_array, ids_array)
-
-                # Update checkpoint
-                checkpoint["processed_ids"] = list(processed_ids_set | set(batch_ids))
-                checkpoint["total_processed"] = total_processed
-                checkpoint["files_completed"] = list(files_completed)
-                save_incremental_checkpoint(checkpoint)
-
-                # Reset batch accumulators
-                processed_ids_set.update(batch_ids)
-                batch_embeddings = []
-                batch_ids = []
-                items_since_checkpoint = 0
-
-                print(f"  Checkpoint saved. Incremental embeddings: {total_processed:,}")
-
-        # Mark file as completed
-        files_completed.add(pq_file_str)
+    # Process final partial batch
+    if texts:
+        embeddings = model.encode(
+            texts,
+            show_progress_bar=False,
+            convert_to_numpy=True,
+            normalize_embeddings=True
+        )
+        batch_embeddings.append(embeddings)
+        batch_ids.extend(ids)
+        total_processed += len(ids)
 
     # Save final batch
     if batch_embeddings:
         print(f"\n  Saving final batch ({len(batch_ids):,} items)...")
         emb_array = np.vstack(batch_embeddings)
         ids_array = np.array(batch_ids, dtype=np.int32)
-        total_saved = save_incremental_embeddings(emb_array, ids_array)
+        save_incremental_embeddings_atomic(emb_array, ids_array)
 
-        # Final checkpoint
-        checkpoint["processed_ids"] = list(processed_ids_set | set(batch_ids))
         checkpoint["total_processed"] = total_processed
-        checkpoint["files_completed"] = list(files_completed)
+        checkpoint["row_offset"] = 0
         save_incremental_checkpoint(checkpoint)
 
     # Load final result
